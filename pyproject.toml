@@ -26,6 +26,7 @@ dependencies = [
     "neptune-scale==0.13.0",
     "flatdict==4.0.0",
     "fastdigest==0.8.3",
+    "numpy>=2.3.4",
 ]
 
 [project.optional-dependencies]
