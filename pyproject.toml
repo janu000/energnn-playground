@@ -51,6 +51,11 @@ dev = [
     "pandas-stubs>=2.2.2",
     "boto3-stubs>=1.28.0",
     "types-tqdm>=4",
+    "sphinx>=8.1.3",
+    "sphinx-copybutton>=0.5.2",
+    "nbsphinx>=0.9.8",
+    "furo>=2025.12.19",
+    "energnn[docs]",
 ]
 
 [build-system]
@@ -72,3 +77,11 @@ ignore_missing_imports = true
 testpaths = [
     "tests"
 ]
+
+[tool.uv.workspace]
+members = [
+    ".",
+]
+
+[tool.uv.sources]
+energnn = { workspace = true }
