@@ -16,3 +16,6 @@
 
 # Data
 /my_playground/data/*
+
+# Training artifacts
+/my_playground/checkpoints/

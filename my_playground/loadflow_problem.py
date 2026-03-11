@@ -19,53 +19,54 @@ from utils.loadflow_data_utils import load_problem_from_pandapower_net
 
 
 class LoadFlowProblem(Problem):
-    CONTEXT_STRUCTURE: GraphStructure = GraphStructure(
+    CONTEXT_STRUCTURE = GraphStructure(
         edges={
-            "lines": EdgeStructure.from_list(
-                address_list=["from_bus", "to_bus"],
-                feature_list=["kind", "r_pu", "x_pu", "b_pu", "tap", "phase_shift_deg", "rating_pu"],
-            ),
-            "generators": EdgeStructure.from_list(
-                address_list=["bus"],
+
+            "buses": EdgeStructure.from_list(
+                address_list=None,
                 feature_list=[
-                    "generator_type",  # PV vs slack
-                    "p_set_pu",
-                    "q_set_pu",
-                    "vm_pu_set",
-                    "va_deg_set",
-                    "vm_mask",
-                    "va_mask",
-                    "p_mask",
-                    "q_mask",
-                    "p_min_pu",
-                    "p_max_pu",
-                    "q_min_pu",
-                    "q_max_pu",
+                    "bus_type",        # 0 = PQ, 1 = PV, 2 = Slack
+                    "p_load_pu",
+                    "q_load_pu",
+                    "p_gen_pu",
+                    "q_gen_set_pu",    # only for PV/slack
+                    "vm_set_pu",       # only for PV/slack
+                    "va_set_deg",      # only for slack
+                    "p_gen_min_pu",
+                    "p_gen_max_pu",
+                    "q_gen_min_pu",
+                    "q_gen_max_pu",
                 ],
             ),
-            "loads": EdgeStructure.from_list(
-                address_list=["bus"],
-                feature_list=["p_set_pu", "q_set_pu"],
+
+            "lines": EdgeStructure.from_list(
+                address_list=["from_bus", "to_bus"],
+                feature_list=[
+                    "r_pu",
+                    "x_pu",
+                    "b_pu",
+                    "tap",
+                    "phase_shift_deg",
+                    "rating_pu",
+                ],
             ),
         }
     )
 
-    DECISION_STRUCTURE: GraphStructure = GraphStructure(
+
+    DECISION_STRUCTURE = GraphStructure(
         edges={
-            "lines": EdgeStructure.from_list(
+            "buses": EdgeStructure.from_list(
                 address_list=None,
-                feature_list=["p_from_pu", "q_from_pu", "p_to_pu", "q_to_pu"],
-            ),
-            "generators": EdgeStructure.from_list(
-                address_list=None,
-                feature_list=["p_pu", "q_pu", "vm_pu", "va_deg"],
-            ),
-            "loads": EdgeStructure.from_list(
-                address_list=None,
-                feature_list=["p_pu", "q_pu", "vm_pu", "va_deg"],
+                feature_list=[
+                    "vm_pu",
+                    "va_deg",
+                    "q_gen_pu",
+                ],
             ),
         }
     )
+
 
     def __init__(
         self,
@@ -92,7 +93,7 @@ class LoadFlowProblem(Problem):
         self._oracle = oracle
         self.jax_context = JaxGraph.from_numpy_graph(context)
         self.jax_oracle = JaxGraph.from_numpy_graph(oracle)
-        self._decision_grad_fn = jax.grad(lambda pred: self.loss(prediction=pred))
+        self._decision_grad_fn = jax.grad(lambda pred: self.loss(prediction=pred), allow_int=True)
 
     @classmethod
     def load_dataset(cls, dataset_path: str | Path) -> list[Any]:
@@ -100,10 +101,22 @@ class LoadFlowProblem(Problem):
         with path.open("rb") as f:
             payload = pickle.load(f)
 
+        if isinstance(payload, list):
+            return payload
+
         if not isinstance(payload, dict):
-            raise ValueError("Dataset file must contain a dictionary payload.")
-        if payload.get("format") != "loadflow_3bus_dataset_pickle_v1":
-            raise ValueError("Unsupported dataset format. Expected 'loadflow_3bus_dataset_pickle_v1'.")
+            raise ValueError("Dataset file must contain a dictionary payload or a list of nets.")
+
+        supported_formats = {
+            "loadflow_3bus_dataset_pickle_v1",
+            "loadflow_random_nbus_dataset_pickle_v1",
+        }
+        payload_format = payload.get("format")
+        if payload_format not in supported_formats:
+            raise ValueError(
+                "Unsupported dataset format. Expected one of "
+                f"{sorted(supported_formats)}. Got: {payload_format!r}."
+            )
         if "nets" not in payload or not isinstance(payload["nets"], list):
             raise ValueError("Dataset payload must contain a list field 'nets'.")
 
@@ -112,14 +125,14 @@ class LoadFlowProblem(Problem):
     def get_context(self, get_info: bool = False):
         info = {}
         if get_info:
-            generator_features = self._context.edges["generators"].feature_dict
+            bus_features = self._context.edges["buses"].feature_dict
+            bus_type = np.asarray(bus_features["bus_type"], dtype=np.float32)
             info = {
                 "n_addresses": int(self._context.true_shape.addresses),
                 "edges": {k: int(v) for k, v in self._context.true_shape.edges.items()},
-                "gen_vm_mask_ratio": float(np.mean(generator_features["vm_mask"])),
-                "gen_va_mask_ratio": float(np.mean(generator_features["va_mask"])),
-                "gen_p_mask_ratio": float(np.mean(generator_features["p_mask"])),
-                "gen_q_mask_ratio": float(np.mean(generator_features["q_mask"])),
+                "pq_ratio": float(np.mean(bus_type == 0.0)),
+                "pv_ratio": float(np.mean(bus_type == 1.0)),
+                "slack_ratio": float(np.mean(bus_type == 2.0)),
             }
         return self.jax_context, info
 
@@ -127,7 +140,7 @@ class LoadFlowProblem(Problem):
     def _jax_feature_idx_map(edge: JaxEdge) -> dict[str, int]:
         if edge.feature_names is None:
             return {}
-        return {name: int(idx) for name, idx in edge.feature_names.items()}
+        return {name: int(np.asarray(idx).reshape(-1)[0]) for name, idx in edge.feature_names.items()}
 
     def _edge_gradient_and_mse(
         self,
@@ -175,7 +188,26 @@ class LoadFlowProblem(Problem):
         return sq_error_sum / jnp.maximum(n_values, 1.0)
 
     def get_gradient(self, *, decision, get_info: bool = False):
-        gradient = self._decision_grad_fn(decision)
+        gradient = decision.to_numpy_graph()
+        oracle = self.jax_oracle.to_numpy_graph()
+
+        for edge_name, edge in gradient.edges.items():
+            if edge_name not in oracle.edges:
+                continue
+            oracle_edge = oracle.edges[edge_name]
+            if edge.feature_array is None or oracle_edge.feature_array is None:
+                continue
+            if edge.feature_names is None or oracle_edge.feature_names is None:
+                continue
+            for feature_name, grad_idx in edge.feature_names.items():
+                if feature_name not in oracle_edge.feature_names:
+                    continue
+                oracle_idx = oracle_edge.feature_names[feature_name]
+                edge.feature_array[..., int(grad_idx)] = (
+                    edge.feature_array[..., int(grad_idx)] - oracle_edge.feature_array[..., int(oracle_idx)]
+                )
+
+        gradient = JaxGraph.from_numpy_graph(gradient)
 
         info = {}
         if get_info:
@@ -249,7 +281,7 @@ class LoadFlowBatch(ProblemBatch):
 
         self.jax_context_batch = JaxGraph.from_numpy_graph(np_context_batch)
         self.jax_oracle_batch = JaxGraph.from_numpy_graph(np_oracle_batch)
-        self._batch_grad_fn = jax.grad(lambda pred: self.loss(prediction=pred))
+        self._batch_grad_fn = jax.grad(lambda pred: self.loss(prediction=pred), allow_int=True)
 
     @property
     def context_structure(self) -> GraphStructure:
@@ -263,7 +295,7 @@ class LoadFlowBatch(ProblemBatch):
     def _jax_feature_idx_map(edge: JaxEdge) -> dict[str, int]:
         if edge.feature_names is None:
             return {}
-        return {name: int(idx) for name, idx in edge.feature_names.items()}
+        return {name: int(np.asarray(idx).reshape(-1)[0]) for name, idx in edge.feature_names.items()}
 
     def _edge_gradient_and_mse(self, prediction_edge: JaxEdge, target_edge: JaxEdge) -> tuple[jax.Array, jax.Array]:
         idx_pred = self._jax_feature_idx_map(prediction_edge)
@@ -313,7 +345,26 @@ class LoadFlowBatch(ProblemBatch):
         return self.jax_context_batch, info
 
     def get_gradient(self, *, decision: JaxGraph, get_info: bool = False) -> tuple[JaxGraph, dict[str, Any]]:
-        gradient = self._batch_grad_fn(decision)
+        gradient = decision.to_numpy_graph()
+        oracle = self.jax_oracle_batch.to_numpy_graph()
+
+        for edge_name, edge in gradient.edges.items():
+            if edge_name not in oracle.edges:
+                continue
+            oracle_edge = oracle.edges[edge_name]
+            if edge.feature_array is None or oracle_edge.feature_array is None:
+                continue
+            if edge.feature_names is None or oracle_edge.feature_names is None:
+                continue
+            for feature_name, grad_idx in edge.feature_names.items():
+                if feature_name not in oracle_edge.feature_names:
+                    continue
+                oracle_idx = oracle_edge.feature_names[feature_name]
+                edge.feature_array[..., int(grad_idx)] = (
+                    edge.feature_array[..., int(grad_idx)] - oracle_edge.feature_array[..., int(oracle_idx)]
+                )
+
+        gradient = JaxGraph.from_numpy_graph(gradient)
         info: dict[str, Any] = {}
         if get_info:
             mse = self.loss(prediction=decision)
@@ -409,15 +460,13 @@ def generate_3bus_problem(seed: int | None = None):
     n_addresses = 3
     registry = np.arange(n_addresses, dtype=np.int32)
 
-    line_from_bus = np.array([0, 1, 0], dtype=np.int32)
-    line_to_bus = np.array([1, 2, 2], dtype=np.int32)
-    line_kind = np.array([0, 0, 1], dtype=np.int32)
-
-    base_r = rng.uniform(0.0015, 0.0120, size=3).astype(np.float32)
-    base_x = rng.uniform(0.0100, 0.1200, size=3).astype(np.float32)
-    base_b = rng.uniform(0.0000, 0.0030, size=3).astype(np.float32)
-    tap = np.array([1.0, 1.0, float(rng.uniform(0.95, 1.05))], dtype=np.float32)
-    phase = np.array([0.0, 0.0, float(rng.uniform(-4.0, 4.0))], dtype=np.float32)
+    line_from_bus = np.array([0, 2], dtype=np.int32)
+    line_to_bus = np.array([1, 1], dtype=np.int32)
+    base_r = rng.uniform(0.0015, 0.0120, size=2).astype(np.float32)
+    base_x = rng.uniform(0.0100, 0.1200, size=2).astype(np.float32)
+    base_b = rng.uniform(0.0000, 0.0030, size=2).astype(np.float32)
+    tap = np.ones(2, dtype=np.float32)
+    phase = np.zeros(2, dtype=np.float32)
 
     p_load_mw = float(rng.uniform(450.0, 950.0))
     q_load_mvar = float(rng.uniform(120.0, 360.0))
@@ -435,26 +484,14 @@ def generate_3bus_problem(seed: int | None = None):
     q1 = np.float32(-q_load_mvar / S_BASE_MVA)
     q2 = np.float32(q_pv_mvar / S_BASE_MVA)
 
-    p_aux = np.float32(rng.uniform(-0.5, 0.5) * max(abs(float(p0)), 0.1))
-    q_aux = np.float32(rng.uniform(-0.5, 0.5) * max(abs(float(q0)), 0.1))
-
-    p02 = p_aux
-    p01 = p0 - p02
-    p12 = p1 + p01
-
-    q02 = q_aux
-    q01 = q0 - q02
-    q12 = q1 + q01
-
-    p_from = np.array([p01, p12, p02], dtype=np.float32)
+    p_from = np.array([p0, p2], dtype=np.float32)
     p_to = -p_from
-    q_from = np.array([q01, q12, q02], dtype=np.float32)
+    q_from = np.array([q0, q2], dtype=np.float32)
     q_to = -q_from
 
     rating = (1.5 * np.maximum(np.abs(p_from), np.abs(q_from)) + 0.5).astype(np.float32)
 
     line_features = {
-        "kind": line_kind.astype(np.float32),
         "r_pu": base_r,
         "x_pu": base_x,
         "b_pu": base_b,
@@ -464,39 +501,29 @@ def generate_3bus_problem(seed: int | None = None):
     }
     line_edge = Edge.from_dict(address_dict={"from_bus": line_from_bus, "to_bus": line_to_bus}, feature_dict=line_features)
 
-    gen_bus = np.array([0, 2], dtype=np.int32)
-    gen_type = np.array([1.0, 0.0], dtype=np.float32)
+    gen_type = np.array([2.0, 1.0], dtype=np.float32)
     gen_p_mw = np.array([0.0, p_pv_mw], dtype=np.float32)
     gen_q_mvar = np.array([0.0, 0.0], dtype=np.float32)
     gen_vm_set = np.array([1.00, float(rng.uniform(0.99, 1.04))], dtype=np.float32)
     gen_va_set = np.array([0.0, 0.0], dtype=np.float32)
 
-    generator_features = {
-        "generator_type": gen_type,
-        "p_set_pu": gen_p_mw / S_BASE_MVA,
-        "q_set_pu": gen_q_mvar / S_BASE_MVA,
-        "vm_pu_set": gen_vm_set,
-        "va_deg_set": gen_va_set,
-        "vm_mask": np.array([1.0, 1.0], dtype=np.float32),
-        "va_mask": np.array([1.0, 0.0], dtype=np.float32),
-        "p_mask": np.array([0.0, 1.0], dtype=np.float32),
-        "q_mask": np.array([0.0, 0.0], dtype=np.float32),
-        "p_min_pu": np.array([0.0, 0.0], dtype=np.float32),
-        "p_max_pu": np.array(
-            [max(30.0, 1.4 * p_slack_mw / S_BASE_MVA), max(12.0, 1.2 * p_pv_mw / S_BASE_MVA)],
+    bus_features = {
+        "bus_type": np.array([2.0, 0.0, 1.0], dtype=np.float32),
+        "p_load_pu": np.array([0.0, -p1, 0.0], dtype=np.float32),
+        "q_load_pu": np.array([0.0, -q1, 0.0], dtype=np.float32),
+        "p_gen_pu": np.array([0.0, 0.0, gen_p_mw[1] / S_BASE_MVA], dtype=np.float32),
+        "q_gen_set_pu": np.array([0.0, 0.0, gen_q_mvar[1] / S_BASE_MVA], dtype=np.float32),
+        "vm_set_pu": np.array([gen_vm_set[0], 0.0, gen_vm_set[1]], dtype=np.float32),
+        "va_set_deg": np.array([gen_va_set[0], 0.0, 0.0], dtype=np.float32),
+        "p_gen_min_pu": np.array([0.0, 0.0, 0.0], dtype=np.float32),
+        "p_gen_max_pu": np.array(
+            [max(30.0, 1.4 * p_slack_mw / S_BASE_MVA), 0.0, max(12.0, 1.2 * p_pv_mw / S_BASE_MVA)],
             dtype=np.float32,
         ),
-        "q_min_pu": np.array([min(-15.0, 1.2 * q_slack_mvar / S_BASE_MVA), -4.0], dtype=np.float32),
-        "q_max_pu": np.array([max(15.0, 1.2 * q_slack_mvar / S_BASE_MVA), 4.0], dtype=np.float32),
+        "q_gen_min_pu": np.array([min(-15.0, 1.2 * q_slack_mvar / S_BASE_MVA), 0.0, -4.0], dtype=np.float32),
+        "q_gen_max_pu": np.array([max(15.0, 1.2 * q_slack_mvar / S_BASE_MVA), 0.0, 4.0], dtype=np.float32),
     }
-    generator_edge = Edge.from_dict(address_dict={"bus": gen_bus}, feature_dict=generator_features)
-
-    load_bus = np.array([1], dtype=np.int32)
-    load_features = {
-        "p_set_pu": np.array([p1], dtype=np.float32),
-        "q_set_pu": np.array([q1], dtype=np.float32),
-    }
-    load_edge = Edge.from_dict(address_dict={"bus": load_bus}, feature_dict=load_features)
+    bus_edge = Edge.from_dict(address_dict=None, feature_dict=bus_features)
 
     line_state_features = {
         "p_from_pu": p_from,
@@ -517,35 +544,20 @@ def generate_3bus_problem(seed: int | None = None):
     va_pv = np.float32(rng.uniform(-4.0, 1.0))
     va_load = np.float32(rng.uniform(-10.0, -1.0))
 
-    generator_state_features = {
-        "p_pu": np.array([p0, p2], dtype=np.float32),
-        "q_pu": np.array([q0, q2], dtype=np.float32),
-        "vm_pu": np.array([vm_slack, vm_pv], dtype=np.float32),
-        "va_deg": np.array([va_slack, va_pv], dtype=np.float32),
+    bus_state_features = {
+        "vm_pu": np.array([vm_slack, vm_load, vm_pv], dtype=np.float32),
+        "va_deg": np.array([va_slack, va_load, va_pv], dtype=np.float32),
+        "q_gen_pu": np.array([q_slack_mvar / S_BASE_MVA, 0.0, q_pv_mvar / S_BASE_MVA], dtype=np.float32),
     }
-    generator_state_edge = Edge.from_dict(address_dict={"bus": gen_bus}, feature_dict=generator_state_features)
-
-    load_state_features = {
-        "p_pu": np.array([p1], dtype=np.float32),
-        "q_pu": np.array([q1], dtype=np.float32),
-        "vm_pu": np.array([vm_load], dtype=np.float32),
-        "va_deg": np.array([va_load], dtype=np.float32),
-    }
-
-    assert np.isclose(float(np.sum(generator_state_features["p_pu"]) + np.sum(load_state_features["p_pu"])), 0.0, atol=1e-6)
-    assert np.isclose(float(np.sum(generator_state_features["q_pu"]) + np.sum(load_state_features["q_pu"])), 0.0, atol=1e-6)
-    load_state_edge = Edge.from_dict(address_dict={"bus": load_bus}, feature_dict=load_state_features)
+    bus_state_edge = Edge.from_dict(address_dict=None, feature_dict=bus_state_features)
 
     edges = {
         "lines": line_edge,
-        "generators": generator_edge,
-        "loads": load_edge,
+        "buses": bus_edge,
     }
 
     oracle_edges = {
-        "lines": line_state_edge,
-        "generators": generator_state_edge,
-        "loads": load_state_edge,
+        "buses": bus_state_edge,
     }
 
     context_graph = Graph.from_dict(edge_dict=edges, registry=registry)

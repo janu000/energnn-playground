@@ -1,6 +1,6 @@
 from energnn.graph.jax import JaxGraph
 from pathlib import Path
-from energnn.graph import visualize_graph
+from utils.visualization_utils import visualize_graph
 
 from loadflow_problem import LoadFlowDataLoader, LoadFlowProblem, print_section, shape_to_printable_dict
 
