@@ -13,3 +13,6 @@
 # Doc
 /docs/_build
 /docs/**/_autosummary/
+
+# Data
+/my_playground/data/*

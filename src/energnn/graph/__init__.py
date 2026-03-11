@@ -22,7 +22,7 @@ from .jax.shape import JaxGraphShape
 from .jax.utils import jnp_to_np, np_to_jnp
 from .shape import GraphShape, collate_shapes, max_shape, separate_shapes, sum_shapes
 from .structure import EdgeStructure, GraphStructure
-from .utils import to_numpy
+from .utils import to_numpy, visualize_graph
 
 __all__ = [
     "Edge",
@@ -46,6 +46,7 @@ __all__ = [
     "separate_shapes",
     "sum_shapes",
     "to_numpy",
+    "visualize_graph",
     "JaxEdge",
     "JaxGraphShape",
     "JaxGraph",
