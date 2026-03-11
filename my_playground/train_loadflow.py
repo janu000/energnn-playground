@@ -1,16 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
-import optax
-import orbax.checkpoint as ocp
-from omegaconf import OmegaConf
-
-from energnn.trainer import SimpleTrainer
-from loadflow_model import LoadFlowModelConfig, build_loadflow_model
-from loadflow_problem import LoadFlowDataLoader, LoadFlowProblem
 
 
 def _parse_hidden_sizes(value: str) -> list[int]:
@@ -68,6 +62,12 @@ def parse_args():
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument(
+        "--cpu-cores",
+        type=int,
+        default=0,
+        help="Number of CPU cores/threads for JAX CPU execution (<=0 uses all available cores).",
+    )
 
     parser.add_argument("--n-breakpoints", type=int, default=50)
     parser.add_argument("--latent-dimension", type=int, default=16)
@@ -81,12 +81,60 @@ def parse_args():
     parser.add_argument("--tags", type=str, default="loadflow,playground")
 
     parser.add_argument("--log-period", type=int, default=1)
-    parser.add_argument("--eval-period", type=int, default=10)
+    parser.add_argument(
+        "--eval-period",
+        type=int,
+        default=10,
+        help="Evaluation period in epochs (set <=0 to disable periodic evaluation).",
+    )
+    parser.add_argument(
+        "--eval-after-epoch",
+        action="store_true",
+        help="If set, run evaluation at the end of every epoch.",
+    )
     return parser.parse_args()
+
+
+def _configure_cpu_threads(requested_cpu_cores: int) -> int:
+    available_cores = os.cpu_count() or 1
+    if requested_cpu_cores <= 0:
+        cpu_cores = available_cores
+    else:
+        cpu_cores = min(requested_cpu_cores, available_cores)
+
+    existing_xla_flags = os.environ.get("XLA_FLAGS", "").strip()
+    kept_flags = []
+    if existing_xla_flags:
+        for token in existing_xla_flags.split():
+            if token.startswith("--xla_cpu_multi_thread_eigen"):
+                continue
+            if token.startswith("intra_op_parallelism_threads="):
+                continue
+            kept_flags.append(token)
+
+    kept_flags.append("--xla_cpu_multi_thread_eigen=true")
+    kept_flags.append(f"intra_op_parallelism_threads={cpu_cores}")
+    os.environ["XLA_FLAGS"] = " ".join(kept_flags).strip()
+
+    os.environ["OMP_NUM_THREADS"] = str(cpu_cores)
+    os.environ["MKL_NUM_THREADS"] = str(cpu_cores)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(cpu_cores)
+    os.environ["NUMEXPR_NUM_THREADS"] = str(cpu_cores)
+
+    return cpu_cores
 
 
 def main() -> None:
     args = parse_args()
+    configured_cpu_cores = _configure_cpu_threads(args.cpu_cores)
+
+    import optax
+    import orbax.checkpoint as ocp
+    from omegaconf import OmegaConf
+
+    from energnn.trainer import SimpleTrainer
+    from loadflow_model import LoadFlowModelConfig, build_loadflow_model
+    from loadflow_problem import LoadFlowDataLoader, LoadFlowProblem
 
     dataset = LoadFlowProblem.load_dataset(args.dataset_path)
     train_dataset, val_dataset = _split_train_val(dataset=dataset, val_fraction=args.val_fraction, seed=args.seed)
@@ -118,9 +166,15 @@ def main() -> None:
     checkpoint_manager = ocp.CheckpointManager(directory=checkpoint_dir)
 
     tracker = _build_tracker(args)
-    cfg = OmegaConf.create(vars(args))
+    cfg_dict = vars(args).copy()
+    cfg_dict["effective_cpu_cores"] = configured_cpu_cores
+    cfg = OmegaConf.create(cfg_dict)
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
     tracker.init_run(name=args.run_name, tags=tags, cfg=cfg)
+
+    eval_period_steps = None
+    if args.eval_period > 0:
+        eval_period_steps = args.eval_period * len(train_loader)
 
     try:
         best_metrics = trainer.train(
@@ -130,9 +184,9 @@ def main() -> None:
             tracker=tracker,
             n_epochs=args.n_epochs,
             log_period=args.log_period,
-            eval_period=args.eval_period,
+            eval_period=eval_period_steps,
             eval_before_training=True,
-            eval_after_epoch=True,
+            eval_after_epoch=args.eval_after_epoch,
             progress_bar=True,
         )
     finally:

@@ -21,9 +21,8 @@ from utils.loadflow_data_utils import load_problem_from_pandapower_net
 class LoadFlowProblem(Problem):
     CONTEXT_STRUCTURE = GraphStructure(
         edges={
-
             "buses": EdgeStructure.from_list(
-                address_list=None,
+                address_list=["bus"],
                 feature_list=[
                     "bus_type",        # 0 = PQ, 1 = PV, 2 = Slack
                     "p_load_pu",
@@ -42,6 +41,7 @@ class LoadFlowProblem(Problem):
             "lines": EdgeStructure.from_list(
                 address_list=["from_bus", "to_bus"],
                 feature_list=[
+                    "kind", # line=0, trafo=1
                     "r_pu",
                     "x_pu",
                     "b_pu",
@@ -142,6 +142,10 @@ class LoadFlowProblem(Problem):
             return {}
         return {name: int(np.asarray(idx).reshape(-1)[0]) for name, idx in edge.feature_names.items()}
 
+    @staticmethod
+    def _feature_idx(value) -> int:
+        return int(np.asarray(value).reshape(-1)[0])
+
     def _edge_gradient_and_mse(
         self,
         prediction_edge: JaxEdge,
@@ -202,9 +206,10 @@ class LoadFlowProblem(Problem):
             for feature_name, grad_idx in edge.feature_names.items():
                 if feature_name not in oracle_edge.feature_names:
                     continue
-                oracle_idx = oracle_edge.feature_names[feature_name]
-                edge.feature_array[..., int(grad_idx)] = (
-                    edge.feature_array[..., int(grad_idx)] - oracle_edge.feature_array[..., int(oracle_idx)]
+                grad_i = self._feature_idx(grad_idx)
+                oracle_i = self._feature_idx(oracle_edge.feature_names[feature_name])
+                edge.feature_array[..., grad_i] = (
+                    edge.feature_array[..., grad_i] - oracle_edge.feature_array[..., oracle_i]
                 )
 
         gradient = JaxGraph.from_numpy_graph(gradient)
@@ -297,6 +302,10 @@ class LoadFlowBatch(ProblemBatch):
             return {}
         return {name: int(np.asarray(idx).reshape(-1)[0]) for name, idx in edge.feature_names.items()}
 
+    @staticmethod
+    def _feature_idx(value) -> int:
+        return int(np.asarray(value).reshape(-1)[0])
+
     def _edge_gradient_and_mse(self, prediction_edge: JaxEdge, target_edge: JaxEdge) -> tuple[jax.Array, jax.Array]:
         idx_pred = self._jax_feature_idx_map(prediction_edge)
         idx_tgt = self._jax_feature_idx_map(target_edge)
@@ -359,9 +368,10 @@ class LoadFlowBatch(ProblemBatch):
             for feature_name, grad_idx in edge.feature_names.items():
                 if feature_name not in oracle_edge.feature_names:
                     continue
-                oracle_idx = oracle_edge.feature_names[feature_name]
-                edge.feature_array[..., int(grad_idx)] = (
-                    edge.feature_array[..., int(grad_idx)] - oracle_edge.feature_array[..., int(oracle_idx)]
+                grad_i = self._feature_idx(grad_idx)
+                oracle_i = self._feature_idx(oracle_edge.feature_names[feature_name])
+                edge.feature_array[..., grad_i] = (
+                    edge.feature_array[..., grad_i] - oracle_edge.feature_array[..., oracle_i]
                 )
 
         gradient = JaxGraph.from_numpy_graph(gradient)
@@ -455,7 +465,6 @@ def generate_3bus_problem(seed: int | None = None):
     """
 
     rng = np.random.default_rng(seed)
-    S_BASE_MVA = 100.0
 
     n_addresses = 3
     registry = np.arange(n_addresses, dtype=np.int32)
@@ -468,21 +477,21 @@ def generate_3bus_problem(seed: int | None = None):
     tap = np.ones(2, dtype=np.float32)
     phase = np.zeros(2, dtype=np.float32)
 
-    p_load_mw = float(rng.uniform(450.0, 950.0))
-    q_load_mvar = float(rng.uniform(120.0, 360.0))
+    p_load_pu = float(rng.uniform(4.5, 9.5))
+    q_load_pu = float(rng.uniform(1.2, 3.6))
 
-    p_pv_mw = float(rng.uniform(0.35 * p_load_mw, 0.85 * p_load_mw))
-    p_slack_mw = p_load_mw - p_pv_mw
+    p_pv_pu = float(rng.uniform(0.35 * p_load_pu, 0.85 * p_load_pu))
+    p_slack_pu = p_load_pu - p_pv_pu
 
-    q_pv_mvar = float(rng.uniform(-120.0, 220.0))
-    q_slack_mvar = q_load_mvar - q_pv_mvar
+    q_pv_pu = float(rng.uniform(-1.2, 2.2))
+    q_slack_pu = q_load_pu - q_pv_pu
 
-    p0 = np.float32(p_slack_mw / S_BASE_MVA)
-    p1 = np.float32(-p_load_mw / S_BASE_MVA)
-    p2 = np.float32(p_pv_mw / S_BASE_MVA)
-    q0 = np.float32(q_slack_mvar / S_BASE_MVA)
-    q1 = np.float32(-q_load_mvar / S_BASE_MVA)
-    q2 = np.float32(q_pv_mvar / S_BASE_MVA)
+    p0 = np.float32(p_slack_pu)
+    p1 = np.float32(-p_load_pu)
+    p2 = np.float32(p_pv_pu)
+    q0 = np.float32(q_slack_pu)
+    q1 = np.float32(-q_load_pu)
+    q2 = np.float32(q_pv_pu)
 
     p_from = np.array([p0, p2], dtype=np.float32)
     p_to = -p_from
@@ -492,6 +501,7 @@ def generate_3bus_problem(seed: int | None = None):
     rating = (1.5 * np.maximum(np.abs(p_from), np.abs(q_from)) + 0.5).astype(np.float32)
 
     line_features = {
+        "kind": np.array([0.0, 0.0], dtype=np.float32),
         "r_pu": base_r,
         "x_pu": base_x,
         "b_pu": base_b,
@@ -502,8 +512,8 @@ def generate_3bus_problem(seed: int | None = None):
     line_edge = Edge.from_dict(address_dict={"from_bus": line_from_bus, "to_bus": line_to_bus}, feature_dict=line_features)
 
     gen_type = np.array([2.0, 1.0], dtype=np.float32)
-    gen_p_mw = np.array([0.0, p_pv_mw], dtype=np.float32)
-    gen_q_mvar = np.array([0.0, 0.0], dtype=np.float32)
+    gen_p_pu = np.array([0.0, p_pv_pu], dtype=np.float32)
+    gen_q_set_pu = np.array([0.0, 0.0], dtype=np.float32)
     gen_vm_set = np.array([1.00, float(rng.uniform(0.99, 1.04))], dtype=np.float32)
     gen_va_set = np.array([0.0, 0.0], dtype=np.float32)
 
@@ -511,19 +521,20 @@ def generate_3bus_problem(seed: int | None = None):
         "bus_type": np.array([2.0, 0.0, 1.0], dtype=np.float32),
         "p_load_pu": np.array([0.0, -p1, 0.0], dtype=np.float32),
         "q_load_pu": np.array([0.0, -q1, 0.0], dtype=np.float32),
-        "p_gen_pu": np.array([0.0, 0.0, gen_p_mw[1] / S_BASE_MVA], dtype=np.float32),
-        "q_gen_set_pu": np.array([0.0, 0.0, gen_q_mvar[1] / S_BASE_MVA], dtype=np.float32),
+        "p_gen_pu": np.array([0.0, 0.0, gen_p_pu[1]], dtype=np.float32),
+        "q_gen_set_pu": np.array([0.0, 0.0, gen_q_set_pu[1]], dtype=np.float32),
         "vm_set_pu": np.array([gen_vm_set[0], 0.0, gen_vm_set[1]], dtype=np.float32),
         "va_set_deg": np.array([gen_va_set[0], 0.0, 0.0], dtype=np.float32),
         "p_gen_min_pu": np.array([0.0, 0.0, 0.0], dtype=np.float32),
         "p_gen_max_pu": np.array(
-            [max(30.0, 1.4 * p_slack_mw / S_BASE_MVA), 0.0, max(12.0, 1.2 * p_pv_mw / S_BASE_MVA)],
+            [max(30.0, 1.4 * p_slack_pu), 0.0, max(12.0, 1.2 * p_pv_pu)],
             dtype=np.float32,
         ),
-        "q_gen_min_pu": np.array([min(-15.0, 1.2 * q_slack_mvar / S_BASE_MVA), 0.0, -4.0], dtype=np.float32),
-        "q_gen_max_pu": np.array([max(15.0, 1.2 * q_slack_mvar / S_BASE_MVA), 0.0, 4.0], dtype=np.float32),
+        "q_gen_min_pu": np.array([min(-15.0, 1.2 * q_slack_pu), 0.0, -4.0], dtype=np.float32),
+        "q_gen_max_pu": np.array([max(15.0, 1.2 * q_slack_pu), 0.0, 4.0], dtype=np.float32),
     }
-    bus_edge = Edge.from_dict(address_dict=None, feature_dict=bus_features)
+    bus_address = np.arange(n_addresses, dtype=np.int32)
+    bus_edge = Edge.from_dict(address_dict={"bus": bus_address}, feature_dict=bus_features)
 
     line_state_features = {
         "p_from_pu": p_from,
@@ -547,9 +558,9 @@ def generate_3bus_problem(seed: int | None = None):
     bus_state_features = {
         "vm_pu": np.array([vm_slack, vm_load, vm_pv], dtype=np.float32),
         "va_deg": np.array([va_slack, va_load, va_pv], dtype=np.float32),
-        "q_gen_pu": np.array([q_slack_mvar / S_BASE_MVA, 0.0, q_pv_mvar / S_BASE_MVA], dtype=np.float32),
+        "q_gen_pu": np.array([q_slack_pu, 0.0, q_pv_pu], dtype=np.float32),
     }
-    bus_state_edge = Edge.from_dict(address_dict=None, feature_dict=bus_state_features)
+    bus_state_edge = Edge.from_dict(address_dict={"bus": bus_address}, feature_dict=bus_state_features)
 
     edges = {
         "lines": line_edge,

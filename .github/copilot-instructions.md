@@ -33,6 +33,10 @@
 - Flax NNX und JAX-Typkompatibilitaet haben Vorrang bei Modell- und Trainer-Code.
 - Aendere Tests bevorzugt im gleichen Funktionsbereich wie der Codefix (z. B. Graph/JAX-Paritaet in [tests/graph](../tests/graph)).
 
+## Scope
+- Nimm standardmaessig **keine** Aenderungen ausserhalb von [my_playground](../my_playground) vor.
+- Wenn ein Fix scheinbar ausserhalb von [my_playground](../my_playground) noetig ist, zuerst stoppen und Rueckfrage stellen statt Dateien in `src/`, `tests/`, `docs/` oder Root-Dateien zu aendern.
+
 ## Pitfalls
 - Versionshinweis: CI testet auch 3.10, waehrend [pyproject.toml](../pyproject.toml) `>=3.11` setzt. Bei Python-Versionsthemen zuerst diese Diskrepanz pruefen.
 - Feature-Store-Code ist netzwerkabhaengig; in Tests externe Calls mocken und keine echten Endpunkte voraussetzen.

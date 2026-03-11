@@ -149,8 +149,10 @@ def load_problem_from_pandapower_net(net, problem_cls):
             p_load_pu[b] += float(row.p_mw) / base_mva
             q_load_pu[b] += float(row.q_mvar) / base_mva
 
+    bus_address = np.arange(n_addresses, dtype=np.int32)
+
     bus_edge = Edge.from_dict(
-        address_dict=None,
+        address_dict={"bus": bus_address},
         feature_dict={
             "bus_type": bus_type,
             "p_load_pu": p_load_pu,
@@ -167,7 +169,7 @@ def load_problem_from_pandapower_net(net, problem_cls):
     )
 
     bus_state_edge = Edge.from_dict(
-        address_dict=None,
+        address_dict={"bus": bus_address},
         feature_dict={
             "vm_pu": vm_pu,
             "va_deg": va_deg,

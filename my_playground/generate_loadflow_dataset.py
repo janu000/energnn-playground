@@ -104,6 +104,8 @@ def _add_generators_and_loads(
     required_load_buses: list[int],
     stress_scale: float,
 ) -> None:
+    base_mva = float(getattr(net, "sn_mva", 100.0))
+
     pp.create_ext_grid(
         net,
         bus=slack_bus,
@@ -131,33 +133,39 @@ def _add_generators_and_loads(
     if len(selected_load_buses) == 0 and len(load_buses) > 0:
         selected_load_buses = [int(rng.choice(np.asarray(load_buses, dtype=np.int32)))]
 
-    p_load_mw = rng.uniform(8.0 * stress_scale, 140.0 * stress_scale, size=len(selected_load_buses))
+    p_load_pu = rng.uniform(0.08 * stress_scale, 1.40 * stress_scale, size=len(selected_load_buses))
     power_factor = rng.uniform(0.92, 0.99, size=len(selected_load_buses))
     phi_rad = np.arccos(np.clip(power_factor, 1e-6, 1.0))
     q_over_p = np.tan(phi_rad)
-    q_load_mvar = p_load_mw * q_over_p
-    for bus, p_mw, q_mvar in zip(selected_load_buses, p_load_mw, q_load_mvar):
-        pp.create_load(net, bus=int(bus), p_mw=float(p_mw), q_mvar=float(q_mvar), name=f"load_bus_{int(bus)}")
+    q_load_pu = p_load_pu * q_over_p
+    for bus, p_pu, q_pu in zip(selected_load_buses, p_load_pu, q_load_pu):
+        pp.create_load(
+            net,
+            bus=int(bus),
+            p_mw=float(p_pu * base_mva),
+            q_mvar=float(q_pu * base_mva),
+            name=f"load_bus_{int(bus)}",
+        )
 
     pv_buses = [int(bus) for bus in generator_buses if int(bus) != int(slack_bus)]
     if len(pv_buses) == 0:
         return
 
-    total_load = float(np.sum(p_load_mw))
-    target_non_slack_gen = float(rng.uniform(0.35, 0.85) * total_load)
+    total_load_pu = float(np.sum(p_load_pu))
+    target_non_slack_gen_pu = float(rng.uniform(0.35, 0.85) * total_load_pu)
     gen_weights = rng.uniform(0.4, 1.6, size=len(pv_buses))
     gen_weights = gen_weights / float(np.sum(gen_weights))
-    p_gen_mw = target_non_slack_gen * gen_weights
+    p_gen_pu = target_non_slack_gen_pu * gen_weights
 
-    for bus, p_mw in zip(pv_buses, p_gen_mw):
-        q_cap = float(max(10.0, 0.8 * p_mw))
+    for bus, p_pu in zip(pv_buses, p_gen_pu):
+        q_cap_pu = float(max(0.10, 0.8 * p_pu))
         pp.create_gen(
             net,
             bus=int(bus),
-            p_mw=float(p_mw),
+            p_mw=float(p_pu * base_mva),
             vm_pu=float(rng.uniform(0.985, 1.04)),
-            min_q_mvar=-q_cap,
-            max_q_mvar=q_cap,
+            min_q_mvar=float(-q_cap_pu * base_mva),
+            max_q_mvar=float(q_cap_pu * base_mva),
             name=f"pv_bus_{int(bus)}",
         )
 
