@@ -406,12 +406,19 @@ class LoadFlowDataLoader(ProblemLoader):
         if batch_size <= 0:
             raise ValueError("batch_size must be strictly positive.")
 
-        self.dataset = list(dataset)
+        self.dataset = [sample if isinstance(sample, LoadFlowProblem) else LoadFlowProblem(net=sample) for sample in dataset]
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.seed = seed
         self._current_idx = 0
         self._order = np.arange(len(self.dataset), dtype=np.int32)
+
+        if self.dataset:
+            self._context_max_shape = max_shape([problem._context.true_shape for problem in self.dataset])
+            self._oracle_max_shape = max_shape([problem._oracle.true_shape for problem in self.dataset])
+        else:
+            self._context_max_shape = None
+            self._oracle_max_shape = None
 
     def __iter__(self) -> Iterator[ProblemBatch]:
         self._current_idx = 0
@@ -430,7 +437,11 @@ class LoadFlowDataLoader(ProblemLoader):
         self._current_idx = end
 
         dataset_slice = [self.dataset[int(i)] for i in idx_slice]
-        return LoadFlowBatch.from_dataset(dataset_slice)
+        return LoadFlowBatch(
+            problems=dataset_slice,
+            context_max_shape=self._context_max_shape,
+            oracle_max_shape=self._oracle_max_shape,
+        )
 
     def __len__(self) -> int:
         return math.ceil(len(self.dataset) / self.batch_size)

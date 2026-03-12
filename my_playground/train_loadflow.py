@@ -7,6 +7,62 @@ from pathlib import Path
 import numpy as np
 
 
+class _EpochAverageLossTracker:
+    def __init__(self, base_tracker, *, steps_per_epoch: int):
+        self._base_tracker = base_tracker
+        self._steps_per_epoch = max(1, int(steps_per_epoch))
+        self._epoch_train_losses: list[float] = []
+
+    def init_run(self, *, name, tags, cfg):
+        return self._base_tracker.init_run(name=name, tags=tags, cfg=cfg)
+
+    def stop_run(self):
+        return self._base_tracker.stop_run()
+
+    def get_amortizer_path(self, *, tag):
+        return self._base_tracker.get_amortizer_path(tag=tag)
+
+    def run_track_dataset(self, *, infos, target_path):
+        return self._base_tracker.run_track_dataset(infos=infos, target_path=target_path)
+
+    def run_track_amortizer(self, *, id, target_path):
+        return self._base_tracker.run_track_amortizer(id=id, target_path=target_path)
+
+    @staticmethod
+    def _extract_train_loss(train_infos: dict) -> float | None:
+        candidates = (
+            "3_gradient/mse",
+            "loss",
+            "mse",
+            "rmse",
+            "metrics",
+        )
+        for key in candidates:
+            if key in train_infos:
+                try:
+                    value = float(np.asarray(train_infos[key]).reshape(-1)[0])
+                except Exception:
+                    return None
+                if np.isfinite(value):
+                    return value
+        return None
+
+    def run_append(self, *, infos, step):
+        train_infos = infos.get("train") if isinstance(infos, dict) else None
+        if isinstance(train_infos, dict):
+            train_loss = self._extract_train_loss(train_infos)
+            if train_loss is not None:
+                self._epoch_train_losses.append(train_loss)
+
+        if (int(step) + 1) % self._steps_per_epoch == 0:
+            epoch_idx = (int(step) + 1) // self._steps_per_epoch
+            if self._epoch_train_losses:
+                avg_loss = float(np.mean(self._epoch_train_losses))
+                print(f"Epoch {epoch_idx}: avg_train_loss={avg_loss:.6e}")
+            self._epoch_train_losses.clear()
+
+        return self._base_tracker.run_append(infos=infos, step=step)
+
 def _parse_hidden_sizes(value: str) -> list[int]:
     if not value.strip():
         return []
@@ -166,6 +222,7 @@ def main() -> None:
     checkpoint_manager = ocp.CheckpointManager(directory=checkpoint_dir)
 
     tracker = _build_tracker(args)
+    tracker = _EpochAverageLossTracker(tracker, steps_per_epoch=len(train_loader))
     cfg_dict = vars(args).copy()
     cfg_dict["effective_cpu_cores"] = configured_cpu_cores
     cfg = OmegaConf.create(cfg_dict)

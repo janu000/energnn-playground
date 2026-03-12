@@ -156,6 +156,8 @@ def visualize_graph(
                 x2, y2 = xy[b]
                 ax.plot([x1, x2], [y1, y2], color=color, linewidth=2.0, alpha=0.9, zorder=1)
         elif len(port_names) == 1:
+            if edge_name == "buses":
+                continue
             unary_edge_types[edge_name] = color
             nodes = np.asarray(address_dict[port_names[0]], dtype=np.int64)
             feature_dict = edge.feature_dict or {}
